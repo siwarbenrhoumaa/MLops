@@ -1,1 +1,21 @@
 venv/
+mlruns/
+# Base de données MLflow
+mlflow.db
+
+# Modèles volumineux (optionnel si tu ne veux pas les versionner)
+models/*.joblib
+model_artifacts/*.joblib
+
+# Fichiers temporaires Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Données traitées ou temporaires
+data/processed/
+data/raw/
