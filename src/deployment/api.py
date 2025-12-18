@@ -1,4 +1,9 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+"""
+Backend FastAPI pour la prédiction de crimes à Los Angeles
+Version finale – Modèle chargé correctement au démarrage
+"""
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -7,23 +12,22 @@ import dagshub
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import time
 import logging
+from sklearn.preprocessing import OrdinalEncoder
 
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration DagsHub + MLflow
+# Initialisation DagsHub + MLflow
 dagshub.init(repo_owner='benrhoumamohamed752', repo_name='ProjetMLOps', mlflow=True)
 
 app = FastAPI(
-    title="Crime Prediction API",
-    description="API de prédiction des crimes de Los Angeles avec MLOps",
-    version="2.0.0",
+    title="Crime Prediction API - Los Angeles",
+    description="Prédiction du groupe de crime (4 classes) - Modèle MLflow Production",
+    version="2.1.0",
 )
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,9 +40,8 @@ app.add_middleware(
 model = None
 model_version = None
 prediction_count = 0
-predictions_history = []
+ordinal_encoder = None
 
-# Mapping des classes
 CRIME_CLASSES = {
     0: "Other / Fraud / Public Order Crime",
     1: "Property & Theft Crime",
@@ -46,56 +49,54 @@ CRIME_CLASSES = {
     3: "Violent Crime"
 }
 
-
 # ============================================================================
-#                           MODÈLES PYDANTIC
+# MODÈLES PYDANTIC
 # ============================================================================
-
-class CrimeFeatures(BaseModel):
-    Hour: int = Field(..., ge=0, le=23, description="Heure (0-23)")
-    Day_of_week: int = Field(..., ge=0, le=6, description="Jour (0=Lundi, 6=Dimanche)")
-    Month_num: int = Field(..., ge=1, le=12, description="Mois (1-12)")
-    LAT: float = Field(..., ge=33.0, le=35.0, description="Latitude")
-    LON: float = Field(..., ge=-119.0, le=-117.0, description="Longitude")
-    Vict_Age: Optional[float] = Field(None, ge=0, le=120, description="Âge victime")
-    AREA: Optional[int] = Field(None, ge=1, le=21, description="Zone")
+class CrimeInput(BaseModel):
+    Hour: int = Field(..., ge=0, le=23)
+    Day_of_week: int = Field(..., ge=0, le=6)
+    Month_num: int = Field(..., ge=1, le=12)
+    LAT: float = Field(..., ge=33.0, le=35.0)
+    LON: float = Field(..., ge=-119.0, le=-117.0)
+    Vict_Age: Optional[float] = Field(None, ge=0, le=120)
+    AREA: Optional[int] = Field(None, ge=1, le=21)
+    Vict_Sex: Optional[str] = Field(None, pattern="^(M|F|X)?$")
+    Vict_Descent: Optional[str] = Field(None, pattern="^(H|B|W|A|O)?$")
+    Premis_Cd: Optional[float] = Field(None)
+    Part_1_2: Optional[int] = Field(None)
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
-                "Hour": 20,
+                "Hour": 17,
                 "Day_of_week": 5,
-                "Month_num": 7,
+                "Month_num": 3,
                 "LAT": 34.0522,
                 "LON": -118.2437,
-                "Vict_Age": 35,
-                "AREA": 12
+                "Vict_Age": 26,
+                "AREA": 10
             }
         }
 
-
 class PredictionResponse(BaseModel):
-    predicted_crime: str
-    predicted_crime_code: int
+    predicted_crime_group: str
+    predicted_class_code: int
     confidence: float
     timestamp: str
     model_version: str
 
-
 class BatchPredictionResponse(BaseModel):
-    n_predictions: int
+    total_predictions: int
     predictions: List[PredictionResponse]
-    processing_time: float
+    processing_time_seconds: float
 
-
-class ModelInfo(BaseModel):
+class ModelInfoResponse(BaseModel):
     model_name: str
-    model_version: str
-    model_stage: str
+    version: str
+    stage: str
     metrics: dict
-    features: List[str]
-    n_classes: int
-
+    features_used: List[str]
+    classes: List[str]
 
 class HealthResponse(BaseModel):
     status: str
@@ -103,279 +104,204 @@ class HealthResponse(BaseModel):
     model_version: Optional[str]
     total_predictions: int
 
-
 # ============================================================================
-#                           FONCTIONS UTILITAIRES
+# CHARGEMENT DU MODÈLE (CORRIGÉ)
 # ============================================================================
-
-def load_model_from_production() -> bool:
-    """Charge le modèle depuis MLflow Production"""
-    global model, model_version
+def load_production_model():
+    global model, model_version, ordinal_encoder
+    
+    logger.info("Chargement du modèle Production...")
     
     try:
         model_uri = "models:/crime-prediction-model/Production"
         loaded_model = mlflow.pyfunc.load_model(model_uri)
         
-        # Récupérer la version
         client = mlflow.tracking.MlflowClient()
-        prod_versions = client.get_latest_versions("crime-prediction-model", stages=["Production"])
+        versions = client.get_latest_versions("crime-prediction-model", stages=["Production"])
         
-        if not prod_versions:
-            logger.error("Aucun modèle trouvé en stage Production")
+        if not versions:
+            logger.error("Aucun modèle en Production trouvé")
             return False
-            
-        latest_version = prod_versions[0]
-        model = loaded_model
-        model_version = latest_version.version
         
-        logger.info(f"Modèle chargé avec succès : version {model_version} (run_id: {latest_version.run_id})")
+        v = versions[0]
+        model = loaded_model
+        model_version = v.version
+        
+        # === CORRECTION DÉFINITIVE DE L'ENCODEUR ===
+        ordinal_encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+        
+        # Fit sur 2 colonnes simultanément
+        sample_data = pd.DataFrame([
+            ['M', 'H'],
+            ['F', 'B'],
+            ['X', 'W'],
+            ['Unknown', 'A'],
+            ['Unknown', 'O'],
+            ['Unknown', 'Unknown']
+        ], columns=['Vict Sex', 'Vict Descent'])
+        
+        ordinal_encoder.fit(sample_data)
+        
+        logger.info(f"Modèle chargé avec succès : version {model_version}")
         return True
         
     except Exception as e:
         logger.error(f"Échec du chargement du modèle : {e}")
         model = None
         model_version = None
+        ordinal_encoder = None
         return False
 
-
-def prepare_features(features: CrimeFeatures) -> pd.DataFrame:
-    """Prépare les features avec les bons noms de colonnes"""
-    feature_dict = {
-        'Hour': features.Hour,
-        'Day_of_week': features.Day_of_week,
-        'Month_num': features.Month_num,
-        'LAT': features.LAT,
-        'LON': features.LON
+# ============================================================================
+# PRÉPARATION DES DONNÉES
+# ============================================================================
+def prepare_input(input_data: CrimeInput) -> pd.DataFrame:
+    data = {
+        'Hour': [input_data.Hour],
+        'Day_of_week': [input_data.Day_of_week],
+        'Month_num': [input_data.Month_num],
+        'LAT': [input_data.LAT],
+        'LON': [input_data.LON],
+        'Vict Age': [input_data.Vict_Age if input_data.Vict_Age is not None else np.nan],
+        'AREA': [input_data.AREA if input_data.AREA is not None else np.nan],
+        'Vict Sex': [input_data.Vict_Sex if input_data.Vict_Sex else 'Unknown'],
+        'Vict Descent': [input_data.Vict_Descent if input_data.Vict_Descent else 'Unknown'],
+        'Premis Cd': [input_data.Premis_Cd if input_data.Premis_Cd is not None else np.nan],
+        'Part 1-2': [input_data.Part_1_2 if input_data.Part_1_2 is not None else np.nan]
     }
     
-    if features.Vict_Age is not None:
-        feature_dict['Vict Age'] = features.Vict_Age  # Attention à l'espace dans le nom !
+    df = pd.DataFrame(data)
     
-    if features.AREA is not None:
-        feature_dict['AREA'] = features.AREA
+    columns_order = ['Hour', 'Day_of_week', 'Month_num', 'LAT', 'LON', 'Vict Age', 'AREA',
+                     'Vict Sex', 'Vict Descent', 'Premis Cd', 'Part 1-2']
     
-    return pd.DataFrame([feature_dict])
-
-
-def log_prediction(features: CrimeFeatures, prediction: int, confidence: float):
-    """Log la prédiction pour monitoring"""
-    global prediction_count, predictions_history
+    df = df.reindex(columns=columns_order)
     
-    prediction_count += 1
+    # Imputation numérique (médiane)
+    numeric = ['Hour', 'Day_of_week', 'Month_num', 'LAT', 'LON', 'Vict Age', 'AREA', 'Premis Cd', 'Part 1-2']
+    df[numeric] = df[numeric].fillna(df[numeric].median())
     
-    log_entry = {
-        'timestamp': datetime.now().isoformat(),
-        'prediction': CRIME_CLASSES[prediction],
-        'confidence': confidence,
-        'features': features.dict()
-    }
+    # Encodage catégorique + FORÇAGE EN INT
+    cat = ['Vict Sex', 'Vict Descent']
+    if ordinal_encoder:
+        encoded = ordinal_encoder.transform(df[cat])
+        df[cat] = pd.DataFrame(encoded, columns=cat, index=df.index).astype('int64')  # ← FORÇAGE INT
     
-    predictions_history.append(log_entry)
-    
-    # Garder seulement les 1000 dernières
-    if len(predictions_history) > 1000:
-        predictions_history = predictions_history[-1000:]
-
-
-def predict_single(features: CrimeFeatures) -> PredictionResponse:
-    """Fonction interne pour une seule prédiction (utilisée par /predict et /batch)"""
-    if model is None:
-        raise HTTPException(status_code=503, detail="Modèle non chargé")
-    
-    try:
-        X = prepare_features(features)
-        
-        # Prédiction
-        pred_code = int(model.predict(X)[0])
-        predicted_crime = CRIME_CLASSES[pred_code]
-        
-        # Confiance
-        confidence = 1.0
-        if hasattr(model, "predict_proba"):
-            try:
-                proba = model.predict_proba(X)[0]
-                confidence = float(np.max(proba))
-            except:
-                pass
-        
-        # Log
-        log_prediction(features, pred_code, confidence)
-        
-        return PredictionResponse(
-            predicted_crime=predicted_crime,
-            predicted_crime_code=pred_code,
-            confidence=confidence,
-            timestamp=datetime.now().isoformat(),
-            model_version=str(model_version or "unknown")
-        )
-        
-    except Exception as e:
-        logger.error(f"Erreur lors de la prédiction : {e}")
-        raise HTTPException(status_code=500, detail="Erreur interne lors de la prédiction")
-
+    return df
 
 # ============================================================================
-#                           ENDPOINTS
+# ENDPOINTS
 # ============================================================================
-
 @app.on_event("startup")
-async def startup_event():
-    """Charge le modèle au démarrage de l'API"""
-    logger.info("Démarrage de l'API - Chargement du modèle...")
-    success = load_model_from_production()
-    if not success:
-        logger.warning("L'API démarre sans modèle chargé. Utilisez /reload-model pour charger manuellement.")
+async def startup():
+    load_production_model()
 
+@app.get("/")
+def root():
+    return {"service": "Crime Prediction API", "model_loaded": model is not None, "version": model_version}
 
-@app.get("/", tags=["Info"])
-async def root():
-    return {
-        "message": "Crime Prediction API v2.0",
-        "status": "running",
-        "model_loaded": model is not None,
-        "model_version": str(model_version) if model_version else "none",
-        "endpoints": [
-            "/predict", "/predict/batch", "/health", "/model-info",
-            "/metrics", "/reload-model", "/docs"
-        ]
-    }
-
-
-@app.get("/health", response_model=HealthResponse, tags=["Monitoring"])
-async def health_check():
+@app.get("/health", response_model=HealthResponse)
+def health():
     return HealthResponse(
         status="healthy" if model else "degraded",
         model_loaded=model is not None,
-        model_version=str(model_version) if model_version else None,
+        model_version=model_version,
         total_predictions=prediction_count
     )
 
-
-@app.get("/model-info", response_model=ModelInfo, tags=["Info"])
-async def model_info():
+@app.get("/model-info", response_model=ModelInfoResponse)
+def model_info():
     if model is None:
         raise HTTPException(status_code=503, detail="Modèle non chargé")
     
     client = mlflow.tracking.MlflowClient()
-    try:
-        versions = client.get_latest_versions("crime-prediction-model", stages=["Production"])
-        if not versions:
-            raise HTTPException(status_code=404, detail="Aucun modèle en Production")
-        
-        version_info = versions[0]
-        run = client.get_run(version_info.run_id)
-        
-        return ModelInfo(
-            model_name="crime-prediction-model",
-            model_version=str(version_info.version),
-            model_stage="Production",
-            metrics={
-                "test_accuracy": run.data.metrics.get("test_accuracy", 0.0),
-                "test_f1": run.data.metrics.get("test_f1", 0.0),
-                "cv_mean_accuracy": run.data.metrics.get("cv_mean_accuracy", 0.0)
-            },
-            features=['Hour', 'Day_of_week', 'Month_num', 'LAT', 'LON', 'Vict Age', 'AREA'],
-            n_classes=4
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur MLflow : {str(e)}")
+    versions = client.get_latest_versions("crime-prediction-model", stages=["Production"])
+    v = versions[0]
+    run = client.get_run(v.run_id)
+    
+    return ModelInfoResponse(
+        model_name="crime-prediction-model",
+        version=v.version,
+        stage="Production",
+        metrics=run.data.metrics,
+        features_used=['Hour', 'Day_of_week', 'Month_num', 'LAT', 'LON', 'Vict Age', 'AREA',
+                       'Vict Sex', 'Vict Descent', 'Premis Cd', 'Part 1-2'],
+        classes=list(CRIME_CLASSES.values())
+    )
 
-
-@app.post("/predict", response_model=PredictionResponse, tags=["Prédiction"])
-async def predict(features: CrimeFeatures):
-    return predict_single(features)
-
-
-@app.post("/predict/batch", response_model=BatchPredictionResponse, tags=["Prédiction"])
-async def predict_batch(features_list: List[CrimeFeatures]):
+@app.post("/predict", response_model=PredictionResponse)
+def predict(input_data: CrimeInput):
+    global prediction_count
     if model is None:
         raise HTTPException(status_code=503, detail="Modèle non chargé")
     
-    if len(features_list) == 0:
-        raise HTTPException(status_code=400, detail="Liste vide")
-    
-    if len(features_list) > 1000:
-        raise HTTPException(status_code=400, detail="Maximum 1000 prédictions par batch")
-    
-    start_time = time.time()
-    predictions = []
-    
-    # Prédiction vectorisée si possible, sinon boucle optimisée
     try:
-        # Préparer toutes les features en un seul DataFrame
-        df_list = [prepare_features(f).iloc[0] for f in features_list]
-        X_batch = pd.DataFrame(df_list)
+        X = prepare_input(input_data)
+        pred = int(model.predict(X)[0])
+        crime = CRIME_CLASSES.get(pred, "Unknown")
         
-        # Prédiction batch
-        pred_codes = model.predict(X_batch)
-        pred_codes = pred_codes.astype(int)
-        
-        # Confiance batch
-        confidences = np.ones(len(pred_codes))
+        confidence = 1.0
         if hasattr(model, "predict_proba"):
-            try:
-                probas = model.predict_proba(X_batch)
-                confidences = np.max(probas, axis=1)
-            except:
-                pass
+            proba = model.predict_proba(X)[0]
+            confidence = float(np.max(proba))
         
-        # Construire les réponses
-        for i, (features, pred_code, conf) in enumerate(zip(features_list, pred_codes, confidences)):
-            log_prediction(features, pred_code, float(conf))
-            predictions.append(PredictionResponse(
-                predicted_crime=CRIME_CLASSES[pred_code],
-                predicted_crime_code=pred_code,
-                confidence=float(conf),
-                timestamp=datetime.now().isoformat(),
-                model_version=str(model_version or "unknown")
-            ))
-            
+        prediction_count += 1
+        
+        return PredictionResponse(
+            predicted_crime_group=crime,
+            predicted_class_code=pred,
+            confidence=confidence,
+            timestamp=datetime.now().isoformat(),
+            model_version=model_version or "unknown"
+        )
     except Exception as e:
-        logger.error(f"Erreur en batch : {e}")
-        # Fallback : prédiction une par une
-        for features in features_list:
-            predictions.append(predict_single(features))
-    
-    processing_time = time.time() - start_time
-    
-    return BatchPredictionResponse(
-        n_predictions=len(predictions),
-        predictions=predictions,
-        processing_time=round(processing_time, 3)
-    )
+        logger.error(f"Erreur prédiction : {e}")
+        raise HTTPException(status_code=500, detail="Erreur lors de la prédiction")
 
-
-@app.get("/metrics", tags=["Monitoring"])
-async def get_metrics():
-    if prediction_count == 0:
-        return {"total_predictions": 0, "message": "Aucune prédiction encore"}
+@app.post("/predict/batch", response_model=BatchPredictionResponse)
+def predict_batch(inputs: List[CrimeInput]):
+    global prediction_count
+    if model is None:
+        raise HTTPException(status_code=503, detail="Modèle non chargé")
     
-    df = pd.DataFrame(predictions_history)
-    crime_dist = df['prediction'].value_counts(normalize=True).round(3).to_dict()
+    start = datetime.now()
+    results = []
     
-    return {
-        "total_predictions": prediction_count,
-        "recent_predictions": len(predictions_history),
-        "crime_distribution_percentage": crime_dist,
-        "average_confidence": round(float(df['confidence'].mean()), 4),
-        "last_prediction": predictions_history[-1]['timestamp']
-    }
+    try:
+        for inp in inputs:
+            X = prepare_input(inp)
+            pred = int(model.predict(X)[0])
+            crime = CRIME_CLASSES.get(pred, "Unknown")
+            
+            confidence = 1.0
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X)[0]
+                confidence = float(np.max(proba))
+            
+            prediction_count += 1
+            results.append(PredictionResponse(
+                predicted_crime_group=crime,
+                predicted_class_code=pred,
+                confidence=confidence,
+                timestamp=datetime.now().isoformat(),
+                model_version=model_version or "unknown"
+            ))
+        
+        duration = (datetime.now() - start).total_seconds()
+        
+        return BatchPredictionResponse(
+            total_predictions=len(results),
+            predictions=results,
+            processing_time_seconds=round(duration, 3)
+        )
+    except Exception as e:
+        logger.error(f"Erreur batch : {e}")
+        raise HTTPException(status_code=500, detail="Erreur batch")
 
-
-@app.post("/reload-model", tags=["Admin"])
-async def reload_model():
-    """Recharge le modèle en arrière-plan"""
-    def _reload():
-        time.sleep(1)  # Petit délai pour éviter les conflits
-        load_model_from_production()
-    
-    # Exécution en background
-    import threading
-    thread = threading.Thread(target=_reload)
-    thread.start()
-    
-    return {"message": "Rechargement du modèle lancé en arrière-plan", "status": "started"}
-
+@app.post("/reload-model")
+def reload_model():
+    success = load_production_model()
+    return {"status": "success" if success else "failed", "model_version": model_version or "none"}
 
 if __name__ == "__main__":
     import uvicorn
