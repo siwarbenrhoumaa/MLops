@@ -15,7 +15,15 @@ __pycache__/
 
 # Notebooks checkpoints
 .ipynb_checkpoints/
+# DVC : ne pas tracker les gros fichiers de données
+# On garde seulement les fichiers .dvc (pointeurs)
+data/raw/*
+data/processed/*
 
-# Données traitées ou temporaires
-data/processed/
-data/raw/
+# Exception importante : autoriser les fichiers .dvc dans ces dossiers
+!data/raw/*.dvc
+!data/processed/*.dvc
+
+# Optionnel : si tu veux garder un .gitkeep pour structure dossier
+!data/raw/.gitkeep
+!data/processed/.gitkeep

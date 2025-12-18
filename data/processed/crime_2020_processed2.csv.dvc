@@ -1,0 +1,5 @@
+outs:
+- md5: e0af8168bd54a8fa4f5e6b4499dbe285
+  size: 20154020
+  hash: md5
+  path: crime_2020_processed2.csv
