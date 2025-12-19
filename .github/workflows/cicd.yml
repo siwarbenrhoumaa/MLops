@@ -25,11 +25,6 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install dvc dvc[all]  # ou dvc[s3] si tu utilises S3
-
       - name: Configure DVC
         env:
           DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
@@ -62,7 +57,7 @@ jobs:
           python src/models/train.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --model xgboost
           python src/models/train.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --model lightgbm
           python src/models/ensemble.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --ensemble both
-          python src/models/promote_best_model.py --auto_promote
+          python src/models/promote_best_model.py --year ${{ inputs.year || 2021 }} --auto_promote
 
       - name: Commit & Push DVC changes
         run: |

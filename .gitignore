@@ -1,5 +1,6 @@
 venv/
 mlruns/
+env_deepchecks/
 # Base de données MLflow
 mlflow.db
 

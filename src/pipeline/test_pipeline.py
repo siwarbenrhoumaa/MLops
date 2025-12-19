@@ -42,7 +42,7 @@ if __name__ == "__main__":
     run_command(f"python src/models/ensemble.py --data {data_path} --ensemble both")
 
     # 5. Promotion automatique du meilleur modèle en Production
-    run_command("python src/models/promote_best_model.py --auto_promote")
+    run_command(f"python src/models/promote_best_model.py --year {year} --auto_promote")
 
     print("=" * 80)
     print(f"🎉 TEST PIPELINE TERMINÉ AVEC SUCCÈS POUR L'ANNÉE {year} !")
