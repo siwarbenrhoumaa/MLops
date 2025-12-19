@@ -1,52 +1,74 @@
-name: MLOps Pipeline
+name: MLOps Pipeline with DVC
 
 on:
   push:
+    branches:
+      - main
     paths:
-      - 'data/raw/**'  # Trigger sur nouveau dataset brut
-  schedule:
-    - cron: '0 0 1 * *'  # Tous les 1er du mois à minuit
+      - 'data/raw/crime_Data_*.csv'  # Trigger sur nouveau raw data
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Année à traiter (ex: 2021)'
+        required: true
 
 jobs:
   pipeline:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          pip install dvc dvc[all]  # ou dvc[s3] si tu utilises S3
 
-      - name: Get latest dataset year  # ← Détermine le nouveau dataset (ex: le plus récent)
-        id: get_year
+      - name: Configure DVC
+        env:
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
-          LATEST_YEAR=$(ls data/raw/crime_Data_*.csv | sort -r | head -n1 | grep -oP '(?<=_)\d{4}(?=\.csv)')
-          echo "latest_year=$LATEST_YEAR" >> $GITHUB_OUTPUT
+          dvc remote modify origin --local auth basic
+          dvc remote modify origin --local password $DAGSHUB_TOKEN
+          dvc remote modify origin --local user benrhoumamohamed752
+
+      - name: Pull DVC data
+        run: dvc pull
 
       - name: Preprocess new data
-        run: python src/data/preprocessing.py --year ${{ steps.get_year.outputs.latest_year }}  # ← Passe l'année dynamique
+        run: python src/data/preprocessing.py --year ${{ inputs.year || 2021 }}
 
-      - name: Detect data drift
+      - name: Add processed to DVC
+        run: |
+          dvc add data/processed/crime_${{ inputs.year || 2021 }}_processed.csv
+          git add data/processed/crime_${{ inputs.year || 2021 }}_processed.csv.dvc
+
+      - name: Detect drift
         id: drift
-        run: python src/monitoring/drift_detection.py --new_year ${{ steps.get_year.outputs.latest_year }} --old_year 2020  # ← Compare avec 2020 par défaut
-
-      - name: Retrain if drift detected
-        if: steps.drift.outputs.drift_detected == 'true'
         run: |
-          python src/models/train.py --data data/processed/crime_${{ steps.get_year.outputs.latest_year }}_processed.csv  # ← Réentraîne baselines
-          python src/models/ensemble.py --data data/processed/crime_${{ steps.get_year.outputs.latest_year }}_processed.csv  # ← Réentraîne ensembles
-          python src/models/compare_all_models.py --promote  # ← Compare et promeut le meilleur
+          python src/monitoring/drift_detection.py --old_year 2020 --new_year ${{ inputs.year || 2021 }}
+          echo "drift_detected=$(python -c "import os; print(os.getenv('drift_detected', 'False'))")" >> $GITHUB_OUTPUT
 
-      - name: Commit changes (processed data and hash)
+      - name: Retrain if drift
+        if: steps.drift.outputs.drift_detected == 'True'
         run: |
-          git config --global user.name 'GitHub Actions'
-          git config --global user.email 'actions@github.com'
-          git add data/processed/* .last_data_hash
-          git commit -m "Update processed data and model after drift detection" || echo "No changes"
+          python src/models/train.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --model random_forest
+          python src/models/train.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --model xgboost
+          python src/models/train.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --model lightgbm
+          python src/models/ensemble.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --ensemble both
+          python src/models/promote_best_model.py --auto_promote
+
+      - name: Commit & Push DVC changes
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add .
+          git commit -m "Update processed data and model for year ${{ inputs.year || 2021 }} [ci skip]" || echo "Nothing to commit"
           git push
+          dvc push
