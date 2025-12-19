@@ -1,0 +1,5 @@
+outs:
+- md5: 60ef79ea0652249e016a01b4e0b2d41b
+  size: 58140600
+  hash: md5
+  path: crime_Data_2022.csv
