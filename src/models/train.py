@@ -23,6 +23,7 @@ import argparse
 import os
 import sys
 import warnings
+import argparse
 
 warnings.filterwarnings('ignore')
 
@@ -148,6 +149,7 @@ def train_model(X_train, X_test, y_train, y_test, model_name, label_encoder, fea
 # ---------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description='Entraîner un modèle de prédiction de Crime_Group')
+    parser.add_argument('--data', type=str, default='data/processed/crime_2020_processed2.csv')
     parser.add_argument('--model', type=str, default='random_forest',
                         choices=['random_forest', 'xgboost', 'lightgbm', 'logistic_regression'],
                         help='Type de modèle à entraîner')

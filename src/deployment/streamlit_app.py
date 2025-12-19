@@ -70,6 +70,10 @@ with st.sidebar:
         st.metric("Accuracy", f"{model_info['metrics'].get('test_accuracy', 0):.1%}")
 
     page = st.radio("Menu", ["Accueil", "Prédiction", "Batch"])
+    if st.button("🔄 Refresh Model"):
+        r = requests.post(f"{API_URL}/refresh-model")
+        if r.status_code == 200:
+            st.success("Modèle rechargé !")
 
 # ============================================================================
 #                           PAGES

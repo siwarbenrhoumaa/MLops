@@ -201,6 +201,7 @@ def train_stacking_ensemble(X_train, X_test, y_train, y_test, le):
 # =========================================================
 def main():
     parser = argparse.ArgumentParser(description="Entraînement des modèles ensemble")
+    parser.add_argument('--data', type=str, default='data/processed/crime_2020_processed2.csv')
     parser.add_argument("--ensemble", choices=["voting", "stacking", "both"], default="both",
                         help="Type d'ensemble à entraîner")
     parser.add_argument("--voting", choices=["soft", "hard"], default="soft",

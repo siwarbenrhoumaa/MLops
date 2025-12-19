@@ -1,0 +1,52 @@
+name: MLOps Pipeline
+
+on:
+  push:
+    paths:
+      - 'data/raw/**'  # Trigger sur nouveau dataset brut
+  schedule:
+    - cron: '0 0 1 * *'  # Tous les 1er du mois à minuit
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Get latest dataset year  # ← Détermine le nouveau dataset (ex: le plus récent)
+        id: get_year
+        run: |
+          LATEST_YEAR=$(ls data/raw/crime_Data_*.csv | sort -r | head -n1 | grep -oP '(?<=_)\d{4}(?=\.csv)')
+          echo "latest_year=$LATEST_YEAR" >> $GITHUB_OUTPUT
+
+      - name: Preprocess new data
+        run: python src/data/preprocessing.py --year ${{ steps.get_year.outputs.latest_year }}  # ← Passe l'année dynamique
+
+      - name: Detect data drift
+        id: drift
+        run: python src/monitoring/drift_detection.py --new_year ${{ steps.get_year.outputs.latest_year }} --old_year 2020  # ← Compare avec 2020 par défaut
+
+      - name: Retrain if drift detected
+        if: steps.drift.outputs.drift_detected == 'true'
+        run: |
+          python src/models/train.py --data data/processed/crime_${{ steps.get_year.outputs.latest_year }}_processed.csv  # ← Réentraîne baselines
+          python src/models/ensemble.py --data data/processed/crime_${{ steps.get_year.outputs.latest_year }}_processed.csv  # ← Réentraîne ensembles
+          python src/models/compare_all_models.py --promote  # ← Compare et promeut le meilleur
+
+      - name: Commit changes (processed data and hash)
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add data/processed/* .last_data_hash
+          git commit -m "Update processed data and model after drift detection" || echo "No changes"
+          git push

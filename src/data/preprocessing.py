@@ -9,7 +9,7 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder
 import joblib
 import os
-
+import argparse
 
 def load_data(filepath):
     """Charge les données criminelles depuis un fichier CSV"""
@@ -205,28 +205,31 @@ def get_data_summary(df):
 
 
 if __name__ == "__main__":
-    # Test du module
-    filepath = "data/raw/crime_Data_2020.csv"
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--year', type=int, default=2020, help='Année du dataset à prétraiter')
+    args = parser.parse_args()
+
+    filepath = f"data/raw/crime_Data_{args.year}.csv"  # ← Dynamique
 
     df = load_data(filepath)
     if df is not None:
-        # Nettoyage retourne deux versions
         df_clean, df_full = clean_data(df)
 
-        # Filtrer pour 2020
-        df_2020_clean = filter_by_year(df_clean, 2020)
-        df_2020_full = filter_by_year(df_full, 2020)
+        df_year_clean = filter_by_year(df_clean, args.year)  # ← Filtre pour l'année
+        get_data_summary(df_year_clean)
 
-        # Résumé
-        get_data_summary(df_2020_clean)
+        X, y, le = prepare_for_ml(df_year_clean)
 
-        # Préparer pour ML
-        X, y, le = prepare_for_ml(df_2020_clean, target_col='Crime_Group')
-
-        # Sauvegarde des deux versions
-        output_clean = 'data/processed/crime_2020_processed2.csv'
-        os.makedirs('data/processed', exist_ok=True)
-
-        df_2020_clean.to_csv(output_clean, index=False)
-
+        output_clean = f'data/processed/crime_{args.year}_processed.csv'  # ← Nom dynamique
+        df_year_clean.to_csv(output_clean, index=False)
         print(f"\n✅ Données propres sauvegardées : {output_clean}")
+
+        # ← MISE À JOUR : Mise à jour du hash
+        import hashlib
+        hasher = hashlib.md5()
+        with open(filepath, 'rb') as f:
+            hasher.update(f.read())
+        hash_value = hasher.hexdigest()
+        with open('data/processed/.last_data_hash', 'w') as h:
+            h.write(f"{args.year}:{hash_value}\n")
+        print(f"✅ Hash mis à jour pour {args.year}")

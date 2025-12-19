@@ -297,6 +297,11 @@ def predict_batch(inputs: List[CrimeInput]):
     except Exception as e:
         logger.error(f"Erreur batch : {e}")
         raise HTTPException(status_code=500, detail="Erreur batch")
+    
+@app.post("/refresh-model")  
+def refresh_model():
+    success = load_production_model()
+    return {"status": "refreshed" if success else "failed"}
 
 @app.post("/reload-model")
 def reload_model():
