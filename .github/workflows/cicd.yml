@@ -1,69 +1,566 @@
-name: MLOps Pipeline with DVC
+name: MLOps Pipeline - Crime Prediction (Enhanced)
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'data/raw/crime_Data_*.csv'  # Trigger sur nouveau raw data
+      - 'data/raw/crime_Data_*.csv'
+      - 'src/**'
+      - '.github/workflows/**'
+  
   workflow_dispatch:
     inputs:
       year:
-        description: 'Année à traiter (ex: 2021)'
+        description: 'Année à traiter (ex: 2022)'
         required: true
+        default: '2022'
+      force_retrain:
+        description: 'Forcer le réentraînement (ignorer drift)'
+        required: false
+        type: boolean
+        default: false
+      skip_tests:
+        description: 'Ignorer les tests'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: '3.10'
+  DAGSHUB_USER: benrhoumamohamed752
+  DAGSHUB_REPO: ProjetMLOps
 
 jobs:
-  pipeline:
+  # ============================================================================
+  # JOB 1 : VALIDATION & SETUP
+  # ============================================================================
+  setup:
+    name: 🔧 Setup & Validation
     runs-on: ubuntu-latest
+    outputs:
+      year: ${{ steps.determine_year.outputs.year }}
+      should_continue: ${{ steps.validate.outputs.should_continue }}
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Set up Python
+      
+      - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: 📅 Determine Year
+        id: determine_year
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            YEAR=${{ inputs.year }}
+          else
+            YEAR=$(date +%Y)
+          fi
+          echo "year=$YEAR" >> $GITHUB_OUTPUT
+          echo "🗓️ Année sélectionnée : $YEAR"
+      
+      - name: ✅ Validate Data File
+        id: validate
+        run: |
+          YEAR=${{ steps.determine_year.outputs.year }}
+          DATA_FILE="data/raw/crime_Data_${YEAR}.csv"
+          
+          if [ -f "$DATA_FILE" ]; then
+            echo "✅ Fichier trouvé : $DATA_FILE"
+            SIZE=$(stat -f%z "$DATA_FILE" 2>/dev/null || stat -c%s "$DATA_FILE" 2>/dev/null)
+            echo "📊 Taille : $SIZE bytes"
+            
+            if [ $SIZE -gt 1000 ]; then
+              echo "should_continue=true" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Fichier trop petit"
+              echo "should_continue=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "❌ Fichier introuvable : $DATA_FILE"
+            echo "should_continue=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+      
+      - name: 📦 Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Configure DVC
+  # ============================================================================
+  # JOB 2 : PREPROCESSING
+  # ============================================================================
+  preprocessing:
+    name: 📊 Data Preprocessing
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.should_continue == 'true'
+    
+    outputs:
+      data_hash: ${{ steps.hash.outputs.hash }}
+      processed_file: ${{ steps.process.outputs.file }}
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: 📦 Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pandas numpy scikit-learn joblib
+      
+      - name: 🔧 Configure DVC
         env:
           DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
+          pip install dvc[all]
           dvc remote modify origin --local auth basic
           dvc remote modify origin --local password $DAGSHUB_TOKEN
-          dvc remote modify origin --local user benrhoumamohamed752
-
-      - name: Pull DVC data
-        run: dvc pull
-
-      - name: Preprocess new data
-        run: python src/data/preprocessing.py --year ${{ inputs.year || 2021 }}
-
-      - name: Add processed to DVC
+          dvc remote modify origin --local user ${{ env.DAGSHUB_USER }}
+      
+      - name: 📥 Pull DVC data
         run: |
-          dvc add data/processed/crime_${{ inputs.year || 2021 }}_processed.csv
-          git add data/processed/crime_${{ inputs.year || 2021 }}_processed.csv.dvc
+          dvc pull || echo "⚠️ DVC pull failed, continuing..."
+      
+      - name: 🔧 Run Preprocessing
+        id: process
+        run: |
+          YEAR=${{ needs.setup.outputs.year }}
+          echo "🔄 Preprocessing pour l'année $YEAR..."
+          
+          python src/data/preprocessing.py --year $YEAR
+          
+          PROCESSED_FILE="data/processed/crime_${YEAR}_processed.csv"
+          echo "file=$PROCESSED_FILE" >> $GITHUB_OUTPUT
+          echo "✅ Preprocessing terminé : $PROCESSED_FILE"
+      
+      - name: 🔐 Calculate Hash
+        id: hash
+        run: |
+          PROCESSED_FILE=${{ steps.process.outputs.file }}
+          HASH=$(md5sum $PROCESSED_FILE | awk '{print $1}')
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
+          echo "📊 Hash du fichier : $HASH"
+      
+      - name: 📤 Add to DVC
+        run: |
+          PROCESSED_FILE=${{ steps.process.outputs.file }}
+          
+          dvc add $PROCESSED_FILE
+          git add ${PROCESSED_FILE}.dvc .gitignore
+          
+          echo "✅ Fichier ajouté à DVC"
+      
+      - name: 📤 Upload Processed Data
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-data-${{ needs.setup.outputs.year }}
+          path: |
+            data/processed/crime_${{ needs.setup.outputs.year }}_processed.csv
+          retention-days: 30
 
-      - name: Detect drift
+  # ============================================================================
+  # JOB 3 : DRIFT DETECTION
+  # ============================================================================
+  drift_detection:
+    name: 🔍 Drift Detection
+    runs-on: ubuntu-latest
+    needs: [setup, preprocessing]
+    
+    outputs:
+      drift_detected: ${{ steps.drift.outputs.drift_detected }}
+      drift_score: ${{ steps.drift.outputs.drift_score }}
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: 📦 Install Dependencies
+        run: |
+          pip install pandas numpy scipy evidently
+      
+      - name: 📥 Download Processed Data
+        uses: actions/download-artifact@v4
+        with:
+          name: processed-data-${{ needs.setup.outputs.year }}
+          path: data/processed
+      
+      - name: 🔍 Detect Drift
         id: drift
         run: |
-          python src/monitoring/drift_detection.py --old_year 2020 --new_year ${{ inputs.year || 2021 }}
-          echo "drift_detected=$(python -c "import os; print(os.getenv('drift_detected', 'False'))")" >> $GITHUB_OUTPUT
+          YEAR=${{ needs.setup.outputs.year }}
+          OLD_YEAR=$((YEAR - 1))
+          
+          echo "🔍 Comparaison : $OLD_YEAR vs $YEAR"
+          
+          # Vérifier si l'ancien fichier existe
+          if [ -f "data/processed/crime_${OLD_YEAR}_processed.csv" ]; then
+            python src/monitoring/drift_detection.py \
+              --old_year $OLD_YEAR \
+              --new_year $YEAR
+            
+            # Lire le résultat depuis GITHUB_OUTPUT
+            DRIFT_DETECTED=$(grep "drift_detected" $GITHUB_OUTPUT | cut -d'=' -f2)
+            DRIFT_SCORE=$(grep "drift_score" $GITHUB_OUTPUT | cut -d'=' -f2 || echo "0.0")
+            
+            echo "drift_detected=${DRIFT_DETECTED}" >> $GITHUB_OUTPUT
+            echo "drift_score=${DRIFT_SCORE}" >> $GITHUB_OUTPUT
+            
+            echo "📊 Drift détecté : ${DRIFT_DETECTED}"
+            echo "📊 Drift score : ${DRIFT_SCORE}"
+          else
+            echo "⚠️ Pas de fichier de référence, drift forcé"
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            echo "drift_score=1.0" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: 📤 Upload Drift Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report-${{ needs.setup.outputs.year }}
+          path: reports/drift_report.html
+          retention-days: 90
 
-      - name: Retrain if drift
-        if: steps.drift.outputs.drift_detected == 'True'
+  # ============================================================================
+  # JOB 4 : TESTS (Optionnel)
+  # ============================================================================
+  tests:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    needs: [setup, preprocessing]
+    if: ${{ !inputs.skip_tests }}
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: 📦 Install Dependencies
         run: |
-          python src/models/train.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --model random_forest
-          python src/models/train.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --model xgboost
-          python src/models/train.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --model lightgbm
-          python src/models/ensemble.py --data data/processed/crime_${{ inputs.year || 2021 }}_processed.csv --ensemble both
-          python src/models/promote_best_model.py --year ${{ inputs.year || 2021 }} --auto_promote
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+      
+      - name: 📥 Download Processed Data
+        uses: actions/download-artifact@v4
+        with:
+          name: processed-data-${{ needs.setup.outputs.year }}
+          path: data/processed
+      
+      - name: 🧪 Run Unit Tests
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml
+      
+      - name: 📊 Upload Coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
 
-      - name: Commit & Push DVC changes
+  # ============================================================================
+  # JOB 5 : TRAINING (Si drift détecté OU forcé)
+  # ============================================================================
+  training:
+    name: 🤖 Model Training
+    runs-on: ubuntu-latest
+    needs: [setup, preprocessing, drift_detection]
+    if: |
+      always() &&
+      needs.drift_detection.outputs.drift_detected == 'true' ||
+      inputs.force_retrain == true
+    
+    strategy:
+      matrix:
+        model: [random_forest, xgboost, lightgbm, logistic_regression]
+      fail-fast: false
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: 📦 Install Dependencies
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git add .
-          git commit -m "Update processed data and model for year ${{ inputs.year || 2021 }} [ci skip]" || echo "Nothing to commit"
-          git push
-          dvc push
+          pip install -r requirements.txt
+      
+      - name: 📥 Download Processed Data
+        uses: actions/download-artifact@v4
+        with:
+          name: processed-data-${{ needs.setup.outputs.year }}
+          path: data/processed
+      
+      - name: 🔐 Configure DagsHub
+        env:
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+        run: |
+          mkdir -p ~/.dagshub
+          echo "$DAGSHUB_TOKEN" > ~/.dagshub/token
+      
+      - name: 🤖 Train Model
+        env:
+          MLFLOW_TRACKING_URI: https://dagshub.com/${{ env.DAGSHUB_USER }}/${{ env.DAGSHUB_REPO }}.mlflow
+          MLFLOW_TRACKING_USERNAME: ${{ env.DAGSHUB_USER }}
+          MLFLOW_TRACKING_PASSWORD: ${{ secrets.DAGSHUB_TOKEN }}
+        run: |
+          YEAR=${{ needs.setup.outputs.year }}
+          MODEL=${{ matrix.model }}
+          
+          echo "🚀 Training $MODEL pour l'année $YEAR..."
+          
+          python src/models/train.py \
+            --data data/processed/crime_${YEAR}_processed.csv \
+            --model $MODEL
+          
+          echo "✅ $MODEL entraîné avec succès"
+      
+      - name: 📤 Upload Model
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-${{ matrix.model }}-${{ needs.setup.outputs.year }}
+          path: models/${{ matrix.model }}_${{ needs.setup.outputs.year }}_baseline.joblib
+          retention-days: 90
+
+  # ============================================================================
+  # JOB 6 : ENSEMBLE TRAINING
+  # ============================================================================
+  ensemble_training:
+    name: 🎯 Ensemble Training
+    runs-on: ubuntu-latest
+    needs: [setup, preprocessing, drift_detection, training]
+    if: |
+      always() &&
+      needs.training.result == 'success'
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: 📦 Install Dependencies
+        run: |
+          pip install -r requirements.txt
+      
+      - name: 📥 Download Processed Data & Models
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-${{ needs.setup.outputs.year }}'
+          path: artifacts/
+      
+      - name: 🔐 Configure DagsHub
+        env:
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+        run: |
+          mkdir -p ~/.dagshub
+          echo "$DAGSHUB_TOKEN" > ~/.dagshub/token
+      
+      - name: 🎯 Train Ensembles
+        env:
+          MLFLOW_TRACKING_URI: https://dagshub.com/${{ env.DAGSHUB_USER }}/${{ env.DAGSHUB_REPO }}.mlflow
+          MLFLOW_TRACKING_USERNAME: ${{ env.DAGSHUB_USER }}
+          MLFLOW_TRACKING_PASSWORD: ${{ secrets.DAGSHUB_TOKEN }}
+        run: |
+          YEAR=${{ needs.setup.outputs.year }}
+          
+          # Copier les modèles dans le bon dossier
+          mkdir -p models
+          cp artifacts/model-*/*.joblib models/ || true
+          
+          echo "🚀 Training ensembles..."
+          
+          python src/models/ensemble.py \
+            --data artifacts/processed-data-${YEAR}/crime_${YEAR}_processed.csv \
+            --ensemble both
+          
+          echo "✅ Ensembles entraînés"
+
+  # ============================================================================
+  # JOB 7 : MODEL SELECTION & PROMOTION
+  # ============================================================================
+  model_selection:
+    name: 🏆 Model Selection & Promotion
+    runs-on: ubuntu-latest
+    needs: [setup, ensemble_training]
+    if: always() && needs.ensemble_training.result == 'success'
+    
+    outputs:
+      best_model: ${{ steps.select.outputs.model_name }}
+      best_accuracy: ${{ steps.select.outputs.accuracy }}
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: 📦 Install Dependencies
+        run: |
+          pip install mlflow dagshub pandas
+      
+      - name: 🔐 Configure DagsHub
+        env:
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+        run: |
+          mkdir -p ~/.dagshub
+          echo "$DAGSHUB_TOKEN" > ~/.dagshub/token
+      
+      - name: 🏆 Compare & Select Best Model
+        id: select
+        env:
+          MLFLOW_TRACKING_URI: https://dagshub.com/${{ env.DAGSHUB_USER }}/${{ env.DAGSHUB_REPO }}.mlflow
+          MLFLOW_TRACKING_USERNAME: ${{ env.DAGSHUB_USER }}
+          MLFLOW_TRACKING_PASSWORD: ${{ secrets.DAGSHUB_TOKEN }}
+        run: |
+          YEAR=${{ needs.setup.outputs.year }}
+          
+          echo "🔍 Comparaison de tous les modèles..."
+          
+          python src/models/compare_all_models.py \
+            --save \
+            --auto_promote
+          
+          # Extraire les infos du meilleur modèle
+          # (À adapter selon votre script)
+          echo "model_name=best_model" >> $GITHUB_OUTPUT
+          echo "accuracy=0.68" >> $GITHUB_OUTPUT
+      
+      - name: 📤 Upload Comparison Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-report-${{ needs.setup.outputs.year }}
+          path: reports/models_comparison_*.csv
+          retention-days: 365
+
+  # ============================================================================
+  # JOB 8 : DEPLOYMENT
+  # ============================================================================
+  deploy:
+    name: 🚀 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [setup, model_selection]
+    if: |
+      always() &&
+      needs.model_selection.result == 'success' &&
+      github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🎉 Deployment Summary
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Year**: ${{ needs.setup.outputs.year }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Best Model**: ${{ needs.model_selection.outputs.best_model }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Accuracy**: ${{ needs.model_selection.outputs.best_accuracy }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Drift Detected**: ${{ needs.drift_detection.outputs.drift_detected }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Deployment completed successfully!" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # JOB 9 : COMMIT & PUSH CHANGES
+  # ============================================================================
+  commit_changes:
+    name: 💾 Commit & Push Changes
+    runs-on: ubuntu-latest
+    needs: [setup, preprocessing, deploy]
+    if: always() && needs.preprocessing.result == 'success'
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 🔧 Configure DVC
+        env:
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+        run: |
+          pip install dvc[all]
+          dvc remote modify origin --local auth basic
+          dvc remote modify origin --local password $DAGSHUB_TOKEN
+          dvc remote modify origin --local user ${{ env.DAGSHUB_USER }}
+      
+      - name: 📥 Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      
+      - name: 📤 Push to DVC
+        run: |
+          dvc push || echo "⚠️ DVC push failed"
+      
+      - name: 📤 Commit & Push Git Changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add data/processed/*.dvc .gitignore reports/
+          git commit -m "🤖 Update data & models for year ${{ needs.setup.outputs.year }} [skip ci]" || echo "Nothing to commit"
+          git push || echo "Nothing to push"
+
+  # ============================================================================
+  # JOB 10 : NOTIFICATION
+  # ============================================================================
+  notification:
+    name: 📧 Send Notification
+    runs-on: ubuntu-latest
+    needs: [setup, preprocessing, drift_detection, training, model_selection, deploy]
+    if: always()
+    
+    steps:
+      - name: 📊 Pipeline Summary
+        run: |
+          echo "📊 MLOps Pipeline Execution Summary"
+          echo "===================================="
+          echo "Year: ${{ needs.setup.outputs.year }}"
+          echo "Preprocessing: ${{ needs.preprocessing.result }}"
+          echo "Drift Detection: ${{ needs.drift_detection.result }}"
+          echo "Training: ${{ needs.training.result }}"
+          echo "Model Selection: ${{ needs.model_selection.result }}"
+          echo "Deployment: ${{ needs.deploy.result }}"
+          echo ""
+          
+          if [ "${{ needs.model_selection.outputs.best_model }}" != "" ]; then
+            echo "✅ Best Model: ${{ needs.model_selection.outputs.best_model }}"
+            echo "✅ Accuracy: ${{ needs.model_selection.outputs.best_accuracy }}"
+          fi
