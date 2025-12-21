@@ -12,9 +12,12 @@ import argparse
 import os
 
 def connect_to_mlflow():
-    dagshub.init(repo_owner='benrhoumamohamed752', repo_name='ProjetMLOps', mlflow=True)
+    # Les env vars sont déjà configurées par le workflow
+    tracking_uri = os.getenv('MLFLOW_TRACKING_URI')
+    if tracking_uri:
+        print(f"✅ MLflow Tracking URI: {tracking_uri}")
+    
     client = MlflowClient()
-    print("✅ Connecté à MLflow via DagsHub\n")
     return client
 
 def get_models_by_year(client, target_year):

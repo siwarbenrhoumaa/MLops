@@ -140,7 +140,11 @@ def main():
     args = parser.parse_args()
 
     # Initialisation MLflow
-    dagshub.init(repo_owner='benrhoumamohamed752', repo_name='ProjetMLOps', mlflow=True)
+    tracking_uri = os.getenv('MLFLOW_TRACKING_URI')
+    if tracking_uri:
+        print(f"✅ MLflow Tracking URI: {tracking_uri}")
+    else:
+        print("⚠️ MLflow Tracking URI non défini, utilisation locale")
     mlflow.set_experiment("crime-prediction-baseline")
 
     # Extraction de l'année depuis le nom du fichier
