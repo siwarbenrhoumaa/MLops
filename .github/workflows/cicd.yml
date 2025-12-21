@@ -271,7 +271,9 @@ jobs:
           MLFLOW_TRACKING_URI: https://dagshub.com/${{ env.DAGSHUB_USER }}/${{ env.DAGSHUB_REPO }}.mlflow
           MLFLOW_TRACKING_USERNAME: ${{ env.DAGSHUB_USER }}
           MLFLOW_TRACKING_PASSWORD: ${{ secrets.DAGSHUB_TOKEN }}
-        run: python src/models/compare_all_models.py --save --auto_promote
+        run: |
+          YEAR=${{ needs.setup.outputs.year }}
+          python src/models/promote_best_model.py --year {year} --auto_promote
 
   commit_dvc:
     name: 💾 Commit DVC
