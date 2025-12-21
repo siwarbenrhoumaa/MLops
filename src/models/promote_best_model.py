@@ -1,7 +1,7 @@
 """
 Script de promotion FORCÉE du meilleur modèle de l'année
 TOUJOURS remplace le modèle en Production par le meilleur de l'année actuelle
-Peu importe si c'est mieux ou moins bon que l'ancien
+VERSION CORRIGÉE : Récupération dynamique des features depuis MLflow
 """
 
 import mlflow
@@ -116,10 +116,7 @@ def get_models_by_year(client, target_year):
 
 
 def display_comparison_with_production(best_new_model, prod_info):
-    """
-    Affiche la comparaison avec Production
-    Mais TOUJOURS promouvoir le nouveau
-    """
+    """Affiche la comparaison avec Production"""
     print("\n" + "=" * 130)
     print("⚖️  COMPARAISON : NOUVEAU vs PRODUCTION (Information uniquement)")
     print("=" * 130)
@@ -184,9 +181,72 @@ def display_comparison(df):
     print(f"   → Ce modèle REMPLACERA celui en Production")
 
 
+def create_dummy_input_from_features(features_str):
+    """
+    Crée un dummy input avec TOUTES les features utilisées lors de l'entraînement
+    
+    Args:
+        features_str: String des features séparées par virgule (depuis MLflow params)
+    
+    Returns:
+        DataFrame avec toutes les colonnes nécessaires
+    """
+    # Parser les features
+    if not features_str:
+        # Features par défaut si non trouvées
+        features = ['Hour', 'Day_of_week', 'Month_num', 'LAT', 'LON', 'Vict Age', 'AREA']
+        print(f"   ⚠️  Paramètre 'features' vide, utilisation des features par défaut")
+    else:
+        features = [f.strip() for f in features_str.split(',')]
+    
+    print(f"   📋 Features détectées ({len(features)}) : {features}")
+    
+    # Créer le DataFrame avec TOUTES les features
+    dummy_data = {}
+    
+    for feat in features:
+        # Valeurs par défaut pour chaque type de feature
+        if feat == 'Hour':
+            dummy_data[feat] = [12]
+        elif feat == 'Day_of_week':
+            dummy_data[feat] = [3]
+        elif feat == 'Month_num':
+            dummy_data[feat] = [6]
+        elif feat == 'LAT':
+            dummy_data[feat] = [34.05]
+        elif feat == 'LON':
+            dummy_data[feat] = [-118.25]
+        elif feat == 'Vict Age':
+            dummy_data[feat] = [35.0]
+        elif feat == 'AREA':
+            dummy_data[feat] = [15]
+        elif feat == 'Vict Sex':
+            dummy_data[feat] = [0]  # Valeur encodée
+        elif feat == 'Vict Descent':
+            dummy_data[feat] = [0]  # Valeur encodée
+        elif feat == 'Premis Cd':
+            dummy_data[feat] = [101.0]
+        elif feat == 'Part 1-2':
+            dummy_data[feat] = [1]
+        else:
+            # Feature inconnue, mettre une valeur par défaut
+            dummy_data[feat] = [0]
+            print(f"   ⚠️  Feature inconnue '{feat}', valeur par défaut = 0")
+    
+    df = pd.DataFrame(dummy_data)
+    
+    # S'assurer que l'ordre des colonnes correspond exactement
+    df = df[features]
+    
+    print(f"   ✅ Dummy input créé : shape={df.shape}, colonnes={list(df.columns)}")
+    
+    return df
+
+
 def promote_model(client, best_run_info, model_name="crime-prediction-model"):
     """
     Promouvoir le modèle en Production
+    VERSION CORRIGÉE : Récupération dynamique des features
     """
     run_id = best_run_info['Run ID']
     model_type = best_run_info['Model']
@@ -204,6 +264,16 @@ def promote_model(client, best_run_info, model_name="crime-prediction-model"):
     print(f"   • Run ID        : {run_id[:12]}...")
     
     try:
+        # 0. ÉTAPE CRITIQUE : Récupérer les métadonnées du run AVANT tout
+        print(f"\n📋 Étape 0/5 : Récupération des métadonnées du run...")
+        original_run = client.get_run(run_id)
+        features_param = original_run.data.params.get('features', '')
+        
+        if not features_param:
+            print("   ⚠️  Paramètre 'features' non trouvé dans MLflow")
+        else:
+            print(f"   ✅ Features récupérées depuis MLflow")
+        
         # 1. Trouver le modèle
         print(f"\n📥 Étape 1/5 : Recherche du modèle...")
         artifacts = client.list_artifacts(run_id)
@@ -243,46 +313,59 @@ def promote_model(client, best_run_info, model_name="crime-prediction-model"):
             
             print(f"   ✅ Chargé : {type(model).__name__}")
             
-            # 3. Créer signature
-            print(f"\n🔧 Étape 3/5 : Signature...")
+            # 3. Créer signature avec les BONNES features
+            print(f"\n🔧 Étape 3/5 : Création de la signature...")
             
-            original_run = client.get_run(run_id)
-            features_param = original_run.data.params.get('features', '')
+            # ⭐ CORRECTION CRITIQUE : Créer dummy input avec TOUTES les features
+            dummy_input = create_dummy_input_from_features(features_param)
             
-            dummy_input = pd.DataFrame({
-                'Hour': [12], 'Day_of_week': [3], 'Month_num': [6],
-                'LAT': [34.05], 'LON': [-118.25], 'Vict Age': [35.0], 'AREA': [15]
-            })
+            # Tester la prédiction AVANT de créer la signature
+            print(f"   🧪 Test de prédiction...")
+            try:
+                predictions = model.predict(dummy_input)
+                print(f"   ✅ Prédiction réussie : {predictions}")
+            except Exception as pred_error:
+                print(f"   ❌ ERREUR de prédiction : {pred_error}")
+                print(f"   📊 Détails du problème :")
+                print(f"      - Shape dummy_input : {dummy_input.shape}")
+                print(f"      - Colonnes : {list(dummy_input.columns)}")
+                print(f"      - Dtypes : {dummy_input.dtypes.to_dict()}")
+                print(f"      - Type modèle : {type(model).__name__}")
+                
+                # Si c'est un modèle LightGBM, afficher plus d'infos
+                if 'LightGBM' in str(type(model).__name__) or 'LGBM' in str(type(model).__name__):
+                    try:
+                        print(f"      - Nombre de features attendues par le modèle : {model.n_features_}")
+                    except:
+                        pass
+                
+                raise pred_error
             
-            if 'Vict Sex' in features_param:
-                dummy_input['Vict Sex'] = [0]
-            if 'Vict Descent' in features_param:
-                dummy_input['Vict Descent'] = [0]
-            if 'Premis Cd' in features_param:
-                dummy_input['Premis Cd'] = [101.0]
-            
-            predictions = model.predict(dummy_input)
+            # Créer la signature
             signature = infer_signature(dummy_input, predictions)
-            
-            print(f"   ✅ Signature créée")
+            print(f"   ✅ Signature créée avec succès")
             
             # 4. Enregistrer dans MLflow
-            print(f"\n📝 Étape 4/5 : Enregistrement...")
+            print(f"\n📝 Étape 4/5 : Enregistrement dans MLflow...")
             
             with mlflow.start_run(run_name=f"promote_force_{year}_{run_id[:8]}"):
+                # Copier les métriques
                 for metric in ['test_accuracy', 'test_f1_weighted', 'cv_accuracy_mean']:
                     value = original_run.data.metrics.get(metric)
                     if value is not None:
                         mlflow.log_metric(metric, value)
                 
+                # Copier les paramètres
                 for k, v in original_run.data.params.items():
                     mlflow.log_param(k, v)
                 
+                # Tags
                 mlflow.set_tag("original_run_id", run_id)
                 mlflow.set_tag("promoted_at", pd.Timestamp.now().isoformat())
                 mlflow.set_tag("year", year)
                 mlflow.set_tag("promotion_strategy", "always_replace")
                 
+                # Enregistrer le modèle
                 mlflow.sklearn.log_model(
                     sk_model=model,
                     artifact_path="model",
@@ -291,7 +374,7 @@ def promote_model(client, best_run_info, model_name="crime-prediction-model"):
                     registered_model_name=model_name
                 )
             
-            print(f"   ✅ Enregistré")
+            print(f"   ✅ Enregistré dans le Model Registry")
         
         # 5. Récupérer nouvelle version
         latest_versions = client.get_latest_versions(model_name, stages=["None"])
@@ -300,54 +383,58 @@ def promote_model(client, best_run_info, model_name="crime-prediction-model"):
             return False
         
         new_version = latest_versions[0].version
-        print(f"   → Nouvelle version : v{new_version}")
+        print(f"   → Nouvelle version créée : v{new_version}")
         
         # 6. Archiver anciennes versions Production
         print(f"\n📦 Étape 5/5 : Transition vers Production...")
         prod_versions = client.get_latest_versions(model_name, stages=["Production"])
         
         for v in prod_versions:
-            old_run = client.get_run(v.run_id)
-            old_year = old_run.data.params.get('year', 'Unknown')
-            old_acc = old_run.data.metrics.get('test_accuracy', 0)
-            
-            client.transition_model_version_stage(
-                name=model_name,
-                version=v.version,
-                stage="Archived"
-            )
-            print(f"   ✓ v{v.version} (année {old_year}, {old_acc:.4f}) → Archived")
+            try:
+                old_run = client.get_run(v.run_id)
+                old_year = old_run.data.params.get('year', 'Unknown')
+                old_acc = old_run.data.metrics.get('test_accuracy', 0)
+                
+                client.transition_model_version_stage(
+                    name=model_name,
+                    version=v.version,
+                    stage="Archived"
+                )
+                print(f"   ✓ v{v.version} (année {old_year}, acc={old_acc:.4f}) → Archived")
+            except Exception as e:
+                print(f"   ⚠️  Erreur lors de l'archivage de v{v.version} : {e}")
         
-        # 7. Promouvoir
+        # 7. Promouvoir en Production
         client.transition_model_version_stage(
             name=model_name,
             version=new_version,
             stage="Production"
         )
         
-        print(f"   ✓ v{new_version} (année {year}, {accuracy:.4f}) → Production")
+        print(f"   ✓ v{new_version} (année {year}, acc={accuracy:.4f}) → PRODUCTION")
         
-        # 8. Description
+        # 8. Ajouter une description détaillée
         description = f"""
 🔄 REMPLACEMENT SYSTÉMATIQUE - Année {year}
 
-📊 Métriques :
+📊 Métriques de Performance :
    • Test Accuracy : {accuracy:.4f} ({accuracy*100:.2f}%)
-   • Test F1       : {best_run_info['Test F1']:.4f}
+   • Test F1-Score : {best_run_info['Test F1']:.4f}
    • CV Mean       : {best_run_info['CV Mean']:.4f}
 
 🔧 Configuration :
-   • Type   : {best_run_info['Type']}
-   • Modèle : {model_type}
-   • Année  : {year}
+   • Type de modèle : {best_run_info['Type']}
+   • Algorithme     : {model_type}
+   • Année données  : {year}
+   • Nombre features: {len(features_param.split(',')) if features_param else 'N/A'}
 
-📅 Promotion :
-   • Date      : {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
-   • Run ID    : {run_id}
-   • Stratégie : Remplacement systématique du meilleur de l'année
+📅 Informations de Promotion :
+   • Date promotion : {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
+   • Run ID original: {run_id}
+   • Stratégie      : Remplacement systématique (toujours utiliser données les plus récentes)
    
-⚡ Note : Ce modèle remplace l'ancien QUEL QUE SOIT sa performance
-          relative. Stratégie : toujours utiliser les données les plus récentes.
+⚡ Note : Ce modèle remplace l'ancien INDÉPENDAMMENT de sa performance relative.
+          La stratégie privilégie l'utilisation des données les plus récentes.
         """.strip()
         
         client.update_model_version(
@@ -359,16 +446,18 @@ def promote_model(client, best_run_info, model_name="crime-prediction-model"):
         print("\n" + "=" * 130)
         print("✅ PROMOTION RÉUSSIE !")
         print("=" * 130)
-        print(f"\n🎉 {model_name} v{new_version} en PRODUCTION")
-        print(f"   Année : {year}")
-        print(f"   Accuracy : {accuracy*100:.2f}%")
-        print(f"\n📍 Vérifier sur : https://dagshub.com/benrhoumamohamed752/ProjetMLOps")
+        print(f"\n🎉 {model_name} v{new_version} est maintenant en PRODUCTION")
+        print(f"   • Année    : {year}")
+        print(f"   • Accuracy : {accuracy*100:.2f}%")
+        print(f"   • Modèle   : {model_type}")
+        print(f"\n📍 Vérifier sur DagsHub : https://dagshub.com/benrhoumamohamed752/ProjetMLOps")
         
         return True
         
     except Exception as e:
-        print(f"\n❌ Erreur : {e}")
+        print(f"\n❌ ERREUR CRITIQUE : {e}")
         import traceback
+        print("\n📋 Traceback complet :")
         traceback.print_exc()
         return False
 
@@ -396,12 +485,15 @@ def main():
         print(f"   • Modèle  : {prod_info['model_type']}")
         print(f"   • Année   : {prod_info['year']}")
         print(f"   • Accuracy: {prod_info['test_accuracy']:.4f} ({prod_info['test_accuracy']*100:.2f}%)")
+    else:
+        print("\n✅ Aucun modèle en Production → Premier déploiement")
     
     # 2. Récupérer les modèles de la nouvelle année
     df = get_models_by_year(client, args.year)
     
     if df is None or len(df) == 0:
         print(f"\n❌ Aucun modèle trouvé pour {args.year}")
+        print(f"   Vérifiez que les modèles ont bien été entraînés avec le paramètre year='{args.year}'")
         return
     
     # 3. Afficher le classement
@@ -416,8 +508,9 @@ def main():
     # 6. Sauvegarder si demandé
     if args.save:
         os.makedirs('reports', exist_ok=True)
-        df.to_csv(f'reports/models_comparison_{args.year}.csv', index=False)
-        print(f"\n💾 Rapport sauvegardé : reports/models_comparison_{args.year}.csv")
+        report_path = f'reports/models_comparison_{args.year}.csv'
+        df.to_csv(report_path, index=False)
+        print(f"\n💾 Rapport sauvegardé : {report_path}")
     
     # 7. TOUJOURS promouvoir si auto_promote
     if args.auto_promote:
@@ -430,11 +523,13 @@ def main():
         success = promote_model(client, best_new, args.model_name)
         
         if success:
-            print(f"\n✅ Modèle {args.year} déployé en Production !")
+            print(f"\n🎊 SUCCÈS : Modèle {args.year} déployé en Production !")
         else:
-            print(f"\n❌ Échec de la promotion")
+            print(f"\n❌ ÉCHEC : La promotion a échoué - vérifier les logs ci-dessus")
+            exit(1)
     else:
-        print(f"\n💡 Pour promouvoir automatiquement, relancer avec --auto_promote")
+        print(f"\n💡 Pour promouvoir automatiquement :")
+        print(f"   python src/models/promote_best_model.py --year {args.year} --auto_promote")
     
     print("\n" + "=" * 130)
     print("✅ ANALYSE TERMINÉE")
