@@ -273,7 +273,7 @@ jobs:
           MLFLOW_TRACKING_PASSWORD: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
           YEAR=${{ needs.setup.outputs.year }}
-          python src/models/promote_best_model.py --year {year} --auto_promote
+          python src/models/promote_best_model.py --year ${YEAR} --auto_promote
 
   commit_dvc:
     name: 💾 Commit DVC
