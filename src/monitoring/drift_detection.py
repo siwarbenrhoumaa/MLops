@@ -5,19 +5,45 @@ from evidently.report import Report
 from evidently.metrics import DatasetDriftMetric, ColumnDriftMetric
 
 def detect_drift(old_file, new_file, threshold=0.1):
+    """
+    FONCTION PRINCIPALE DE DÉTECTION DE DRIFT
+
+    Cette fonction :
+    - charge deux datasets (référence et courant)
+    - compare leur distribution
+    - génère un rapport HTML Evidently
+    - retourne un booléen indiquant si un drift est détecté
+    """
     print(f"Chargement des données : {old_file} et {new_file}")
     old_df = pd.read_csv(old_file)
     new_df = pd.read_csv(new_file)
+    """
+    CHARGEMENT DES DONNÉES
+    - old_df : dataset de référence (ancienne année)
+    - new_df : dataset courant (nouvelle année)
+    Ces deux datasets seront comparés statistiquement
+    """
 
     # Colonnes communes
     common_columns = old_df.columns.intersection(new_df.columns)
     old_df = old_df[common_columns]
     new_df = new_df[common_columns]
     print(f"Colonnes communes utilisées : {list(common_columns)}")
-
+    """
+    SÉLECTION DES COLONNES COMMUNES
+    - Évite les erreurs dues à des colonnes absentes
+    - Garantit une comparaison cohérente
+    - Essentiel lorsque le schéma évolue dans le temps
+    """
     # Métriques
     metrics = [DatasetDriftMetric()]
-
+    """
+    MÉTRIQUE DE DRIFT GLOBAL
+    DatasetDriftMetric :
+    - mesure la dérive globale entre les deux datasets
+    - agrège l’information sur toutes les colonnes
+    - fournit un score synthétique de drift
+    """
     # Colonnes numériques sûres pour drift individuel
     safe_numeric_cols = ['LAT', 'LON', 'Vict Age', 'AREA', 'Premis Cd', 'Hour', 'Day_of_week', 'Month_num']
     for col in safe_numeric_cols:

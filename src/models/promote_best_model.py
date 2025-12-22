@@ -3,7 +3,16 @@ Script de promotion FORCÉE du meilleur modèle de l'année
 TOUJOURS remplace le modèle en Production par le meilleur de l'année actuelle
 VERSION CORRIGÉE : Récupération dynamique des features depuis MLflow
 """
-
+"""
+OBJECTIF GLOBAL DU SCRIPT
+Ce script implémente une stratégie MLOps volontairement agressive :
+- analyser tous les modèles entraînés pour une année donnée
+- sélectionner automatiquement le meilleur selon la Test Accuracy
+- promouvoir ce modèle en Production dans MLflow
+- archiver systématiquement l’ancien modèle en Production
+Cette stratégie garantit que le modèle en production utilise toujours
+les données les plus récentes, même si le gain de performance est faible.
+"""
 import mlflow
 from mlflow.tracking import MlflowClient
 from mlflow.entities import ViewType
@@ -24,7 +33,11 @@ def connect_to_mlflow():
     client = MlflowClient()
     return client
 
-
+"""
+- Initialise le client MLflow
+- Supporte un backend distant DagsHub
+- Centralise la connexion pour tout le script
+"""
 def get_production_model_info(client, model_name="crime-prediction-model"):
     """Récupère les infos du modèle actuellement en Production"""
     try:
@@ -51,11 +64,21 @@ def get_production_model_info(client, model_name="crime-prediction-model"):
     except Exception as e:
         print(f"⚠️  Erreur récupération Production : {e}")
         return None
-
+"""
+- Identifier le modèle actuellement en Production
+- Récupérer ses métriques pour comparaison
+Cette information est informative uniquement pour l'affichage
+"""
 
 def get_models_by_year(client, target_year):
     """Récupère tous les modèles d'une année spécifique"""
-    
+    """
+    FONCTION CLÉ DU SCRIPT
+    - Analyse les experiments baseline et ensemble (voting et stacking)
+    - Filtre par année (paramètre MLflow)
+    - Récupère les métriques clés
+    - Construit un DataFrame comparatif
+    """
     print("=" * 130)
     print(f"📊 ANALYSE DES MODÈLES - ANNÉE {target_year}")
     print("=" * 130)
@@ -113,7 +136,11 @@ def get_models_by_year(client, target_year):
     df = pd.DataFrame(all_results)
     df = df.sort_values('Test Accuracy', ascending=False).reset_index(drop=True)
     return df
-
+"""
+SORTIE
+Un DataFrame classé par performance décroissante
+La première ligne correspond TOUJOURS au modèle à promouvoir
+"""
 
 def display_comparison_with_production(best_new_model, prod_info):
     """Affiche la comparaison avec Production"""
@@ -241,12 +268,25 @@ def create_dummy_input_from_features(features_str):
     print(f"   ✅ Dummy input créé : shape={df.shape}, colonnes={list(df.columns)}")
     
     return df
-
+"""
+- Évite les erreurs de type :
+  "Model expects X features but got Y"
+- Fonctionne pour tous les types de modèles (RF, XGB, LGBM, Stacking, Voting)
+"""
 
 def promote_model(client, best_run_info, model_name="crime-prediction-model"):
     """
     Promouvoir le modèle en Production
     VERSION CORRIGÉE : Récupération dynamique des features
+    """
+    """
+    PIPELINE DE PROMOTION
+    1. Récupération des artifacts du run
+    2. Chargement du modèle
+    3. Création d'une signature correcte
+    4. Enregistrement dans MLflow
+    5. Archivage de l'ancien modèle Production
+    6. Promotion du nouveau modèle
     """
     run_id = best_run_info['Run ID']
     model_type = best_run_info['Model']
